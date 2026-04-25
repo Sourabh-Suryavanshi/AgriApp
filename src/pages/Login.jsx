@@ -32,10 +32,6 @@ const Login = () => {
         await account.deleteSession('current')
         return
       }
-
-      console.log('Profile found:', profile)
-      console.log('Role:', profile.role)
-
       if (profile.role === 'owner') {
         window.location.href = '/dashboard'
       } else if (profile.role === 'customer') {

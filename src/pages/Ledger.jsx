@@ -37,7 +37,6 @@ const Ledger = () => {
     setLoading(true)
     setError('')
     try {
-              console.log("transactions:", TRANSACTIONS_ID);
       const [customerRes, txRes] = await Promise.all([
         databases.listDocuments(DB_ID, PROFILES_ID, [
           Query.equal('$id', customerId)
