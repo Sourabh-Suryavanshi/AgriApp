@@ -7,6 +7,8 @@ import {
   DB_ID, PROFILES_ID, TRANSACTIONS_ID, BILL_BUCKET_ID,
   Query, ID
 } from '../lib/appwrite'
+import jsPDF from 'jspdf'
+import autoTable from 'jspdf-autotable'
 
 const Ledger = () => {
   const navigate = useNavigate()
@@ -30,6 +32,9 @@ const Ledger = () => {
   const [billPreview, setBillPreview] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(false)
   const [viewImage, setViewImage] = useState(null)
+  const [generatingPdf, setGeneratingPdf] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [customerPhone, setCustomerPhone] = useState('')
 
   const canAccess = isOwner || customerId === userProfile?.$id
 
@@ -41,7 +46,6 @@ const Ledger = () => {
         databases.listDocuments(DB_ID, PROFILES_ID, [
           Query.equal('$id', customerId)
         ]),
-        
         databases.listDocuments(DB_ID, TRANSACTIONS_ID, [
           Query.equal('customer_id', customerId),
           Query.orderDesc('$createdAt'),
@@ -113,10 +117,8 @@ const Ledger = () => {
     }
     setSaving(true)
     setError('')
-
     try {
       let imageId = null
-
       if (billImage) {
         setUploadProgress(true)
         const uploaded = await storage.createFile(
@@ -127,11 +129,8 @@ const Ledger = () => {
         imageId = uploaded.$id
         setUploadProgress(false)
       }
-
       await databases.createDocument(
-        DB_ID,
-        TRANSACTIONS_ID,
-        ID.unique(),
+        DB_ID, TRANSACTIONS_ID, ID.unique(),
         {
           customer_id: customerId,
           type: formType,
@@ -141,7 +140,6 @@ const Ledger = () => {
           ...(imageId && { image_id: imageId }),
         }
       )
-
       setFormOpen(false)
       setBillImage(null)
       setBillPreview(null)
@@ -149,7 +147,6 @@ const Ledger = () => {
       setNote('')
       setDate(new Date().toISOString().split('T')[0])
       await fetchLedgerData()
-
     } catch (err) {
       setError(err?.message || 'Failed to add transaction.')
     } finally {
@@ -163,11 +160,7 @@ const Ledger = () => {
     setDeletingId(tx.$id)
     try {
       if (tx.image_id) {
-        try {
-          await storage.deleteFile(BILL_BUCKET_ID, tx.image_id)
-        } catch {
-          // continue even if image delete fails
-        }
+        try { await storage.deleteFile(BILL_BUCKET_ID, tx.image_id) } catch {}
       }
       await databases.deleteDocument(DB_ID, TRANSACTIONS_ID, tx.$id)
       await fetchLedgerData()
@@ -185,10 +178,233 @@ const Ledger = () => {
   const formatDate = (tx) => {
     const dateStr = tx.date || tx.$createdAt
     return new Date(dateStr).toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric'
+      day: '2-digit', month: 'short', year: 'numeric'
     })
+  }
+
+  // ─── PDF Generator ───────────────────────────────────────────
+  const generatePDF = () => {
+    const doc = new jsPDF()
+    const pageWidth = doc.internal.pageSize.getWidth()
+    const today = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric'
+    })
+
+    // ── Header background
+    doc.setFillColor(34, 102, 56)
+    doc.rect(0, 0, pageWidth, 38, 'F')
+
+    // ── Shop name
+    doc.setTextColor(255, 255, 255)
+    doc.setFontSize(18)
+    doc.setFont('helvetica', 'bold')
+    doc.text('Gomtesh Agro Agency', pageWidth / 2, 14, { align: 'center' })
+
+    // ── Subtitle
+    doc.setFontSize(10)
+    doc.setFont('helvetica', 'normal')
+    doc.text('Udhaar Ledger Statement', pageWidth / 2, 22, { align: 'center' })
+    doc.text(`Generated: ${today}`, pageWidth / 2, 30, { align: 'center' })
+
+    // ── Customer Info box
+    doc.setTextColor(0, 0, 0)
+    doc.setFillColor(240, 253, 244)
+    doc.roundedRect(14, 44, pageWidth - 28, 28, 3, 3, 'F')
+
+    doc.setFontSize(11)
+    doc.setFont('helvetica', 'bold')
+    doc.text('Customer Details', 20, 53)
+
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(10)
+    doc.text(`Name: ${customer?.full_name || ''}`, 20, 61)
+    doc.text(`Phone: ${customer?.phone || ''}`, 20, 67)
+    doc.text(`Username: @${customer?.username || ''}`, 110, 61)
+
+    // ── Balance Summary box
+    doc.setFillColor(255, 245, 245)
+    doc.roundedRect(14, 78, pageWidth - 28, 26, 3, 3, 'F')
+
+    doc.setFontSize(10)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(180, 0, 0)
+    doc.text(`Total Due:  Rs. ${totalDue.toFixed(2)}`, 20, 88)
+
+    doc.setTextColor(0, 120, 60)
+    doc.text(`Total Paid: Rs. ${totalPaid.toFixed(2)}`, 110, 88)
+
+    doc.setFontSize(12)
+    if (balance > 0) {
+      doc.setTextColor(180, 0, 0)
+      doc.text(`Balance Due: Rs. ${balance.toFixed(2)}`, 20, 98)
+    } else if (balance === 0) {
+      doc.setTextColor(0, 120, 60)
+      doc.text('Balance: CLEAR (Hishob Saaf)', 20, 98)
+    } else {
+      doc.setTextColor(200, 100, 0)
+      doc.text(`Advance: Rs. ${Math.abs(balance).toFixed(2)}`, 20, 98)
+    }
+
+    // ── Transactions Table
+    doc.setTextColor(0, 0, 0)
+    doc.setFontSize(11)
+    doc.setFont('helvetica', 'bold')
+    doc.text('Transaction History', 14, 114)
+
+    const tableRows = transactions.map((tx, index) => [
+      index + 1,
+      formatDate(tx),
+      tx.type === 'due' ? 'Due (Udhaar)' : 'Payment (Bharle)',
+      tx.note || '—',
+      tx.type === 'due'
+        ? `- Rs. ${Number(tx.amount).toFixed(2)}`
+        : `+ Rs. ${Number(tx.amount).toFixed(2)}`,
+    ])
+
+    autoTable(doc, {
+      startY: 118,
+      head: [['#', 'Date', 'Type', 'Note', 'Amount']],
+      body: tableRows,
+      theme: 'striped',
+      headStyles: {
+        fillColor: [34, 102, 56],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 9,
+      },
+      bodyStyles: {
+        fontSize: 9,
+      },
+      columnStyles: {
+        0: { cellWidth: 10, halign: 'center' },
+        1: { cellWidth: 30 },
+        2: { cellWidth: 35 },
+        3: { cellWidth: 60 },
+        4: { cellWidth: 35, halign: 'right' },
+      },
+      didDrawCell: (data) => {
+        if (data.section === 'body' && data.column.index === 4) {
+          const text = data.cell.text[0] || ''
+          if (text.startsWith('-')) {
+            data.cell.styles.textColor = [180, 0, 0]
+          } else if (text.startsWith('+')) {
+            data.cell.styles.textColor = [0, 120, 60]
+          }
+        }
+      },
+      alternateRowStyles: { fillColor: [245, 255, 248] },
+      margin: { left: 14, right: 14 },
+    })
+
+    // ── Footer
+    const finalY = doc.lastAutoTable.finalY + 10
+    doc.setFontSize(8)
+    doc.setTextColor(150, 150, 150)
+    doc.setFont('helvetica', 'italic')
+    doc.text(
+      'This is a computer-generated statement from Gomtesh Agro Agency.',
+      pageWidth / 2,
+      finalY,
+      { align: 'center' }
+    )
+    doc.text(
+      'For any queries contact the shop owner.',
+      pageWidth / 2,
+      finalY + 5,
+      { align: 'center' }
+    )
+
+    return doc
+  }
+
+  // ─── Download PDF ─────────────────────────────────────────────
+  const handleDownloadPDF = () => {
+    setGeneratingPdf(true)
+    try {
+      const doc = generatePDF()
+      const fileName = `${customer?.full_name || 'customer'}_ledger_${new Date().toISOString().split('T')[0]}.pdf`
+      doc.save(fileName)
+    } catch (err) {
+      setError('Failed to generate PDF.')
+    } finally {
+      setGeneratingPdf(false)
+    }
+  }
+
+  // ─── WhatsApp Text Summary ────────────────────────────────────
+  const buildWhatsAppText = () => {
+    const today = new Date().toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric'
+    })
+
+    let text = `🌾 *Gomtesh Agro Agency*\n`
+    text += `📋 *Ledger Statement*\n`
+    text += `📅 Date: ${today}\n`
+    text += `─────────────────────\n`
+    text += `👤 *Customer: ${customer?.full_name}*\n`
+    text += `📞 Phone: ${customer?.phone}\n`
+    text += `─────────────────────\n`
+    text += `💰 *Balance Summary*\n`
+    text += `🔴 Total Due:  ₹${totalDue.toFixed(2)}\n`
+    text += `🟢 Total Paid: ₹${totalPaid.toFixed(2)}\n`
+
+    if (balance > 0) {
+      text += `⚠️ *Balance Due: ₹${balance.toFixed(2)}*\n`
+    } else if (balance === 0) {
+      text += `✅ *Balance: CLEAR (हिशोब साफ)*\n`
+    } else {
+      text += `🟡 *Advance: ₹${Math.abs(balance).toFixed(2)}*\n`
+    }
+
+    text += `─────────────────────\n`
+    text += `📝 *Recent Transactions*\n\n`
+
+    const recent = transactions.slice(0, 10)
+    recent.forEach((tx, i) => {
+      const emoji = tx.type === 'due' ? '🔴' : '🟢'
+      const sign = tx.type === 'due' ? '-' : '+'
+      const note = tx.note ? ` (${tx.note})` : ''
+      text += `${emoji} ${formatDate(tx)}${note}\n`
+      text += `   ${sign}₹${Number(tx.amount).toFixed(2)}\n`
+      if (i < recent.length - 1) text += `\n`
+    })
+
+    if (transactions.length > 10) {
+      text += `\n_...and ${transactions.length - 10} more transactions_\n`
+      text += `_(PDF downloaded for full details)_\n`
+    }
+
+    text += `─────────────────────\n`
+    text += `🌾 Gomtesh Agro Agency\n`
+    text += `_Thank you for your business!_`
+
+    return text
+  }
+
+  // ─── Share Handler ────────────────────────────────────────────
+  const handleShare = () => {
+    setCustomerPhone(customer?.phone || '')
+    setShareModalOpen(true)
+  }
+
+  const handleSendWhatsApp = () => {
+    // Download PDF first
+    handleDownloadPDF()
+
+    // Build WhatsApp message
+    const text = buildWhatsAppText()
+    const encoded = encodeURIComponent(text)
+
+    // Clean phone number
+    const rawPhone = customerPhone.replace(/\D/g, '')
+    const phone = rawPhone.startsWith('91')
+      ? rawPhone
+      : `91${rawPhone}`
+
+    // Open WhatsApp
+    const url = `https://wa.me/${phone}?text=${encoded}`
+    window.open(url, '_blank')
+    setShareModalOpen(false)
   }
 
   return (
@@ -209,13 +425,28 @@ const Ledger = () => {
 
         {/* Customer Info + Balance Card */}
         <div className="bg-white rounded-2xl shadow-sm p-4 mb-3">
-          <h1 className="text-lg font-bold text-gray-800">
-            {customer?.full_name || 'Customer Ledger'}
-          </h1>
-          <p className="text-sm text-gray-400">
-            @{customer?.username || ''}
-            {customer?.phone ? ` · ${customer.phone}` : ''}
-          </p>
+          <div className="flex justify-between items-start">
+            <div>
+              <h1 className="text-lg font-bold text-gray-800">
+                {customer?.full_name || 'Customer Ledger'}
+              </h1>
+              <p className="text-sm text-gray-400">
+                @{customer?.username || ''}
+                {customer?.phone ? ` · ${customer.phone}` : ''}
+              </p>
+            </div>
+
+            {/* Share Button — Owner only */}
+            {isOwner && (
+              <button
+                onClick={handleShare}
+                disabled={generatingPdf || loading}
+                className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 active:bg-green-800 text-white text-xs font-semibold px-3 py-2 rounded-xl transition-colors disabled:opacity-50 shrink-0"
+              >
+                📤 Share
+              </button>
+            )}
+          </div>
 
           <div className="mt-3 pt-3 border-t">
             {balance > 0 && (
@@ -319,13 +550,8 @@ const Ledger = () => {
             </div>
           ) : (
             filteredTransactions.map(tx => (
-              <div
-                key={tx.$id}
-                className="px-4 py-3 border-b last:border-b-0"
-              >
+              <div key={tx.$id} className="px-4 py-3 border-b last:border-b-0">
                 <div className="flex items-center justify-between gap-2">
-
-                  {/* Left — type + note */}
                   <div className="flex-1 min-w-0">
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                       tx.type === 'due'
@@ -340,13 +566,9 @@ const Ledger = () => {
                       </p>
                     )}
                   </div>
-
-                  {/* Center — date */}
                   <p className="text-xs text-gray-400 shrink-0">
                     {formatDate(tx)}
                   </p>
-
-                  {/* Right — amount + delete */}
                   <div className="flex items-center gap-2 shrink-0">
                     <p className={`font-bold text-sm ${
                       tx.type === 'due' ? 'text-red-500' : 'text-green-600'
@@ -365,12 +587,10 @@ const Ledger = () => {
                     )}
                   </div>
                 </div>
-
-                {/* Bill image button */}
                 {tx.image_id && (
                   <button
                     onClick={() => setViewImage(getBillImageUrl(tx.image_id))}
-                    className="mt-2 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-100 active:bg-green-200 transition-colors"
+                    className="mt-2 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-100 transition-colors"
                   >
                     🧾 View Bill / बिल पहा
                   </button>
@@ -380,7 +600,6 @@ const Ledger = () => {
           )}
         </div>
 
-        {/* Error message */}
         {error && (
           <div className="mt-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
             {error}
@@ -388,12 +607,104 @@ const Ledger = () => {
         )}
       </div>
 
-      {/* Add Transaction Modal */}
+      {/* ── Share Modal ─────────────────────────────────────── */}
+      {shareModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
+          <div className="w-full sm:max-w-sm bg-white rounded-t-2xl sm:rounded-2xl shadow-xl p-5">
+
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-base font-bold text-gray-800">
+                📤 Share Ledger
+              </h3>
+              <button
+                onClick={() => setShareModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl font-bold w-8 h-8 flex items-center justify-center"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Customer info preview */}
+            <div className="bg-gray-50 rounded-xl p-3 mb-4">
+              <p className="text-sm font-semibold text-gray-700">
+                {customer?.full_name}
+              </p>
+              <p className="text-xs text-gray-400">
+                {balance > 0
+                  ? `₹${balance.toFixed(2)} Due`
+                  : balance === 0
+                  ? 'Clear / साफ'
+                  : `₹${Math.abs(balance).toFixed(2)} Advance`}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                {transactions.length} transactions total
+              </p>
+            </div>
+
+            {/* Phone number field */}
+            <div className="mb-4">
+              <label className="block text-sm text-gray-600 mb-1">
+                WhatsApp Number / व्हाट्सएप नंबर
+              </label>
+              <div className="flex items-center border rounded-xl overflow-hidden focus-within:ring-2 focus-within:ring-green-500">
+                <span className="px-3 py-2.5 bg-gray-50 text-gray-500 text-sm border-r">
+                  +91
+                </span>
+                <input
+                  type="tel"
+                  value={customerPhone}
+                  onChange={e => setCustomerPhone(e.target.value)}
+                  placeholder="9876543210"
+                  className="flex-1 px-3 py-2.5 text-sm focus:outline-none"
+                  maxLength={10}
+                />
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                PDF will download + WhatsApp will open with summary
+              </p>
+            </div>
+
+            {/* What will be sent info */}
+            <div className="bg-green-50 border border-green-200 rounded-xl p-3 mb-4">
+              <p className="text-xs font-semibold text-green-700 mb-1">
+                What will happen:
+              </p>
+              <p className="text-xs text-green-600">
+                📥 PDF downloads to your device
+              </p>
+              <p className="text-xs text-green-600">
+                💬 WhatsApp opens with transaction summary
+              </p>
+              <p className="text-xs text-green-600">
+                📎 You can attach the PDF in WhatsApp manually
+              </p>
+            </div>
+
+            {/* Buttons */}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShareModalOpen(false)}
+                className="flex-1 border border-gray-300 rounded-xl py-3 text-gray-600 text-sm hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendWhatsApp}
+                disabled={!customerPhone || customerPhone.length < 10}
+                className="flex-1 bg-green-500 hover:bg-green-600 active:bg-green-700 text-white rounded-xl py-3 text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2 transition-colors"
+              >
+                <span>📲</span>
+                Send on WhatsApp
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Add Transaction Modal ───────────────────────────── */}
       {formOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
           <div className="w-full sm:max-w-sm bg-white rounded-t-2xl sm:rounded-2xl shadow-xl p-5 max-h-[92vh] overflow-y-auto">
-
-            {/* Modal Header */}
             <div className="flex justify-between items-center mb-4">
               <h3 className={`text-base font-bold ${
                 formType === 'due' ? 'text-red-500' : 'text-green-700'
@@ -417,8 +728,6 @@ const Ledger = () => {
             )}
 
             <form onSubmit={handleAddEntry} className="space-y-4">
-
-              {/* Amount */}
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
                   Amount (₹) / रक्कम
@@ -435,7 +744,6 @@ const Ledger = () => {
                 />
               </div>
 
-              {/* Note */}
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
                   Note / टीप (optional)
@@ -444,12 +752,11 @@ const Ledger = () => {
                   type="text"
                   value={note}
                   onChange={e => setNote(e.target.value)}
-                  placeholder="e.g. Fertilisers /Cash Payment / Online Payment / Cheque Payment"
+                  placeholder="e.g. Fertilizer / खत"
                   className="w-full border rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-green-500 focus:outline-none text-sm"
                 />
               </div>
 
-              {/* Date */}
               <div>
                 <label className="block text-sm text-gray-600 mb-1">
                   Date / तारीख
@@ -462,14 +769,11 @@ const Ledger = () => {
                 />
               </div>
 
-              {/* Bill Image — only for due */}
               {formType === 'due' && (
                 <div>
                   <label className="block text-sm text-gray-600 mb-2">
                     Bill Image / बिल फोटो (optional)
                   </label>
-
-                  {/* Image preview */}
                   {billPreview && (
                     <div className="relative mb-2">
                       <img
@@ -479,26 +783,18 @@ const Ledger = () => {
                       />
                       <button
                         type="button"
-                        onClick={() => {
-                          setBillImage(null)
-                          setBillPreview(null)
-                        }}
+                        onClick={() => { setBillImage(null); setBillPreview(null) }}
                         className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold"
                       >
                         ✕
                       </button>
                     </div>
                   )}
-
-                  {/* Camera + Gallery buttons */}
                   {!billPreview && (
                     <div className="grid grid-cols-2 gap-2">
-                      {/* Camera */}
-                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors active:bg-green-100">
+                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors">
                         <span className="text-2xl">📷</span>
-                        <span className="text-xs text-gray-500 font-medium">
-                          Camera / कॅमेरा
-                        </span>
+                        <span className="text-xs text-gray-500 font-medium">Camera / कॅमेरा</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -507,13 +803,9 @@ const Ledger = () => {
                           className="hidden"
                         />
                       </label>
-
-                      {/* Gallery */}
-                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors active:bg-green-100">
+                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors">
                         <span className="text-2xl">🖼️</span>
-                        <span className="text-xs text-gray-500 font-medium">
-                          Gallery / गॅलरी
-                        </span>
+                        <span className="text-xs text-gray-500 font-medium">Gallery / गॅलरी</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -526,7 +818,6 @@ const Ledger = () => {
                 </div>
               )}
 
-              {/* Buttons */}
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
@@ -540,17 +831,13 @@ const Ledger = () => {
                   disabled={saving}
                   className={`flex-1 text-white rounded-xl py-3 font-semibold text-sm disabled:opacity-60 transition-colors ${
                     formType === 'due'
-                      ? 'bg-red-500 hover:bg-red-600 active:bg-red-700'
-                      : 'bg-green-600 hover:bg-green-700 active:bg-green-800'
+                      ? 'bg-red-500 hover:bg-red-600'
+                      : 'bg-green-600 hover:bg-green-700'
                   }`}
                 >
                   {saving
-                    ? uploadProgress
-                      ? 'Uploading...'
-                      : 'Saving...'
-                    : formType === 'due'
-                    ? 'Add Due'
-                    : 'Add Payment'}
+                    ? uploadProgress ? 'Uploading...' : 'Saving...'
+                    : formType === 'due' ? 'Add Due' : 'Add Payment'}
                 </button>
               </div>
             </form>
@@ -558,7 +845,7 @@ const Ledger = () => {
         </div>
       )}
 
-      {/* Full screen bill image viewer */}
+      {/* ── Bill Image Viewer ───────────────────────────────── */}
       {viewImage && (
         <div
           className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4"
