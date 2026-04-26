@@ -642,11 +642,11 @@ const getBillImageUrl = (imageId) => {
         <span className="text-3xl">🖼️</span>
         <p className="text-xs text-gray-400">Could not load image</p>
         
-          href={getBillImageUrl(tx.image_id)}
+        <a href={getBillImageUrl(tx.image_id)}
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs text-green-700 underline"
-        <a>
+        >
           Open in new tab →
         </a>
       </div>
