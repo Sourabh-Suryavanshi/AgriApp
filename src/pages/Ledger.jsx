@@ -9,6 +9,7 @@ import {
 } from '../lib/appwrite'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
+import imageCompression from 'browser-image-compression'
 
 const Ledger = () => {
   const navigate = useNavigate()
@@ -31,10 +32,12 @@ const Ledger = () => {
   const [billImage, setBillImage] = useState(null)
   const [billPreview, setBillPreview] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(false)
+  const [compressing, setCompressing] = useState(false)
   const [viewImage, setViewImage] = useState(null)
   const [generatingPdf, setGeneratingPdf] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [customerPhone, setCustomerPhone] = useState('')
+  const [imageUrls, setImageUrls] = useState({})
 
   const canAccess = isOwner || customerId === userProfile?.$id
 
@@ -97,16 +100,48 @@ const Ledger = () => {
     setError('')
   }
 
-  const handleImageChange = (e) => {
+  // ── Image compression + HEIC fix ──────────────────────────────
+  const handleImageChange = async (e) => {
     const file = e.target.files[0]
     if (!file) return
-    if (file.size > 10 * 1024 * 1024) {
-      setError('Image too large. Max 10MB.')
-      return
-    }
-    setBillImage(file)
-    setBillPreview(URL.createObjectURL(file))
+
+    setCompressing(true)
     setError('')
+
+    try {
+      // Compression options
+      const options = {
+        maxSizeMB: 0.5,          // Max 500KB after compression
+        maxWidthOrHeight: 1280,   // Max dimension 1280px
+        useWebWorker: true,
+        fileType: 'image/jpeg',   // Convert everything to JPEG
+        // This fixes HEIC from iPhone — converts to JPEG
+        onProgress: (progress) => {
+          console.log('Compression progress:', progress)
+        }
+      }
+
+      const compressedFile = await imageCompression(file, options)
+
+      console.log('Original size:', (file.size / 1024 / 1024).toFixed(2), 'MB')
+      console.log('Compressed size:', (compressedFile.size / 1024 / 1024).toFixed(2), 'MB')
+
+      // Create a proper JPEG file with correct name
+      const jpegFile = new File(
+        [compressedFile],
+        `bill_${Date.now()}.jpg`,
+        { type: 'image/jpeg' }
+      )
+
+      setBillImage(jpegFile)
+      setBillPreview(URL.createObjectURL(jpegFile))
+
+    } catch (err) {
+      console.log('Compression error:', err)
+      setError('Could not process image. Try again.')
+    } finally {
+      setCompressing(false)
+    }
   }
 
   const handleAddEntry = async (e) => {
@@ -117,8 +152,10 @@ const Ledger = () => {
     }
     setSaving(true)
     setError('')
+
     try {
       let imageId = null
+
       if (billImage) {
         setUploadProgress(true)
         const uploaded = await storage.createFile(
@@ -129,8 +166,11 @@ const Ledger = () => {
         imageId = uploaded.$id
         setUploadProgress(false)
       }
+
       await databases.createDocument(
-        DB_ID, TRANSACTIONS_ID, ID.unique(),
+        DB_ID,
+        TRANSACTIONS_ID,
+        ID.unique(),
         {
           customer_id: customerId,
           type: formType,
@@ -140,6 +180,7 @@ const Ledger = () => {
           ...(imageId && { image_id: imageId }),
         }
       )
+
       setFormOpen(false)
       setBillImage(null)
       setBillPreview(null)
@@ -147,6 +188,7 @@ const Ledger = () => {
       setNote('')
       setDate(new Date().toISOString().split('T')[0])
       await fetchLedgerData()
+
     } catch (err) {
       setError(err?.message || 'Failed to add transaction.')
     } finally {
@@ -171,8 +213,42 @@ const Ledger = () => {
     }
   }
 
+  // ── Fix iPhone image display ───────────────────────────────────
   const getBillImageUrl = (imageId) => {
-    return storage.getFileView(BILL_BUCKET_ID, imageId)
+    try {
+      // getFilePreview converts any format to JPEG/PNG
+      // This fixes HEIC display on iPhone browsers
+      const url = storage.getFilePreview(
+        BILL_BUCKET_ID,
+        imageId,
+        1280,   // width
+        0,      // height (0 = auto)
+        'center', // gravity
+        80,     // quality
+        0,      // border width
+        '',     // border color
+        0,      // border radius
+        1,      // opacity
+        0,      // rotation
+        '',     // background
+        'jpg'   // output format — always JPEG, fixes iPhone HEIC
+      )
+      return url.href || url
+    } catch {
+      // Fallback to getFileView
+      return storage.getFileView(BILL_BUCKET_ID, imageId)
+    }
+  }
+
+  const openBillImage = async (imageId) => {
+    // Check if URL already cached
+    if (imageUrls[imageId]) {
+      setViewImage(imageUrls[imageId])
+      return
+    }
+    const url = getBillImageUrl(imageId)
+    setImageUrls(prev => ({ ...prev, [imageId]: url }))
+    setViewImage(url)
   }
 
   const formatDate = (tx) => {
@@ -182,7 +258,7 @@ const Ledger = () => {
     })
   }
 
-  // ─── PDF Generator ───────────────────────────────────────────
+  // ── PDF Generator ──────────────────────────────────────────────
   const generatePDF = () => {
     const doc = new jsPDF()
     const pageWidth = doc.internal.pageSize.getWidth()
@@ -190,23 +266,19 @@ const Ledger = () => {
       day: '2-digit', month: 'short', year: 'numeric'
     })
 
-    // ── Header background
     doc.setFillColor(34, 102, 56)
     doc.rect(0, 0, pageWidth, 38, 'F')
 
-    // ── Shop name
     doc.setTextColor(255, 255, 255)
     doc.setFontSize(18)
     doc.setFont('helvetica', 'bold')
     doc.text('Gomtesh Agro Agency', pageWidth / 2, 14, { align: 'center' })
 
-    // ── Subtitle
     doc.setFontSize(10)
     doc.setFont('helvetica', 'normal')
     doc.text('Udhaar Ledger Statement', pageWidth / 2, 22, { align: 'center' })
     doc.text(`Generated: ${today}`, pageWidth / 2, 30, { align: 'center' })
 
-    // ── Customer Info box
     doc.setTextColor(0, 0, 0)
     doc.setFillColor(240, 253, 244)
     doc.roundedRect(14, 44, pageWidth - 28, 28, 3, 3, 'F')
@@ -214,14 +286,12 @@ const Ledger = () => {
     doc.setFontSize(11)
     doc.setFont('helvetica', 'bold')
     doc.text('Customer Details', 20, 53)
-
     doc.setFont('helvetica', 'normal')
     doc.setFontSize(10)
     doc.text(`Name: ${customer?.full_name || ''}`, 20, 61)
     doc.text(`Phone: ${customer?.phone || ''}`, 20, 67)
     doc.text(`Username: @${customer?.username || ''}`, 110, 61)
 
-    // ── Balance Summary box
     doc.setFillColor(255, 245, 245)
     doc.roundedRect(14, 78, pageWidth - 28, 26, 3, 3, 'F')
 
@@ -229,7 +299,6 @@ const Ledger = () => {
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(180, 0, 0)
     doc.text(`Total Due:  Rs. ${totalDue.toFixed(2)}`, 20, 88)
-
     doc.setTextColor(0, 120, 60)
     doc.text(`Total Paid: Rs. ${totalPaid.toFixed(2)}`, 110, 88)
 
@@ -245,7 +314,6 @@ const Ledger = () => {
       doc.text(`Advance: Rs. ${Math.abs(balance).toFixed(2)}`, 20, 98)
     }
 
-    // ── Transactions Table
     doc.setTextColor(0, 0, 0)
     doc.setFontSize(11)
     doc.setFont('helvetica', 'bold')
@@ -272,9 +340,7 @@ const Ledger = () => {
         fontStyle: 'bold',
         fontSize: 9,
       },
-      bodyStyles: {
-        fontSize: 9,
-      },
+      bodyStyles: { fontSize: 9 },
       columnStyles: {
         0: { cellWidth: 10, halign: 'center' },
         1: { cellWidth: 30 },
@@ -282,56 +348,39 @@ const Ledger = () => {
         3: { cellWidth: 60 },
         4: { cellWidth: 35, halign: 'right' },
       },
-      didDrawCell: (data) => {
-        if (data.section === 'body' && data.column.index === 4) {
-          const text = data.cell.text[0] || ''
-          if (text.startsWith('-')) {
-            data.cell.styles.textColor = [180, 0, 0]
-          } else if (text.startsWith('+')) {
-            data.cell.styles.textColor = [0, 120, 60]
-          }
-        }
-      },
       alternateRowStyles: { fillColor: [245, 255, 248] },
       margin: { left: 14, right: 14 },
     })
 
-    // ── Footer
     const finalY = doc.lastAutoTable.finalY + 10
     doc.setFontSize(8)
     doc.setTextColor(150, 150, 150)
     doc.setFont('helvetica', 'italic')
     doc.text(
       'This is a computer-generated statement from Gomtesh Agro Agency.',
-      pageWidth / 2,
-      finalY,
-      { align: 'center' }
+      pageWidth / 2, finalY, { align: 'center' }
     )
     doc.text(
       'For any queries contact the shop owner.',
-      pageWidth / 2,
-      finalY + 5,
-      { align: 'center' }
+      pageWidth / 2, finalY + 5, { align: 'center' }
     )
 
     return doc
   }
 
-  // ─── Download PDF ─────────────────────────────────────────────
   const handleDownloadPDF = () => {
     setGeneratingPdf(true)
     try {
       const doc = generatePDF()
       const fileName = `${customer?.full_name || 'customer'}_ledger_${new Date().toISOString().split('T')[0]}.pdf`
       doc.save(fileName)
-    } catch (err) {
+    } catch {
       setError('Failed to generate PDF.')
     } finally {
       setGeneratingPdf(false)
     }
   }
 
-  // ─── WhatsApp Text Summary ────────────────────────────────────
   const buildWhatsAppText = () => {
     const today = new Date().toLocaleDateString('en-IN', {
       day: '2-digit', month: 'short', year: 'numeric'
@@ -371,7 +420,6 @@ const Ledger = () => {
 
     if (transactions.length > 10) {
       text += `\n_...and ${transactions.length - 10} more transactions_\n`
-      text += `_(PDF downloaded for full details)_\n`
     }
 
     text += `─────────────────────\n`
@@ -381,29 +429,18 @@ const Ledger = () => {
     return text
   }
 
-  // ─── Share Handler ────────────────────────────────────────────
   const handleShare = () => {
     setCustomerPhone(customer?.phone || '')
     setShareModalOpen(true)
   }
 
   const handleSendWhatsApp = () => {
-    // Download PDF first
     handleDownloadPDF()
-
-    // Build WhatsApp message
     const text = buildWhatsAppText()
     const encoded = encodeURIComponent(text)
-
-    // Clean phone number
     const rawPhone = customerPhone.replace(/\D/g, '')
-    const phone = rawPhone.startsWith('91')
-      ? rawPhone
-      : `91${rawPhone}`
-
-    // Open WhatsApp
-    const url = `https://wa.me/${phone}?text=${encoded}`
-    window.open(url, '_blank')
+    const phone = rawPhone.startsWith('91') ? rawPhone : `91${rawPhone}`
+    window.open(`https://wa.me/${phone}?text=${encoded}`, '_blank')
     setShareModalOpen(false)
   }
 
@@ -413,7 +450,6 @@ const Ledger = () => {
 
       <div className="w-full max-w-lg mx-auto px-3 py-4">
 
-        {/* Back button */}
         {isOwner && (
           <button
             onClick={() => navigate('/dashboard')}
@@ -435,13 +471,11 @@ const Ledger = () => {
                 {customer?.phone ? ` · ${customer.phone}` : ''}
               </p>
             </div>
-
-            {/* Share Button — Owner only */}
             {isOwner && (
               <button
                 onClick={handleShare}
                 disabled={generatingPdf || loading}
-                className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 active:bg-green-800 text-white text-xs font-semibold px-3 py-2 rounded-xl transition-colors disabled:opacity-50 shrink-0"
+                className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-semibold px-3 py-2 rounded-xl transition-colors disabled:opacity-50 shrink-0"
               >
                 📤 Share
               </button>
@@ -452,44 +486,33 @@ const Ledger = () => {
             {balance > 0 && (
               <p className="text-2xl font-bold text-red-500">
                 ₹{balance.toFixed(2)}
-                <span className="text-sm font-normal text-gray-500 ml-2">
-                  Due / बाकी
-                </span>
+                <span className="text-sm font-normal text-gray-500 ml-2">Due / बाकी</span>
               </p>
             )}
             {balance === 0 && (
-              <p className="text-2xl font-bold text-green-600">
-                ✓ Clear / हिशोब साफ
-              </p>
+              <p className="text-2xl font-bold text-green-600">✓ Clear / हिशोब साफ</p>
             )}
             {balance < 0 && (
               <p className="text-2xl font-bold text-orange-500">
                 ₹{Math.abs(balance).toFixed(2)}
-                <span className="text-sm font-normal text-gray-500 ml-2">
-                  Advance
-                </span>
+                <span className="text-sm font-normal text-gray-500 ml-2">Advance</span>
               </p>
             )}
           </div>
 
-          {/* Summary row */}
           <div className="grid grid-cols-2 gap-2 mt-3">
             <div className="bg-red-50 rounded-xl p-2.5 text-center">
               <p className="text-xs text-gray-400">Total Due / उधार</p>
-              <p className="text-base font-bold text-red-500">
-                ₹{totalDue.toFixed(2)}
-              </p>
+              <p className="text-base font-bold text-red-500">₹{totalDue.toFixed(2)}</p>
             </div>
             <div className="bg-green-50 rounded-xl p-2.5 text-center">
               <p className="text-xs text-gray-400">Total Paid / भरले</p>
-              <p className="text-base font-bold text-green-600">
-                ₹{totalPaid.toFixed(2)}
-              </p>
+              <p className="text-base font-bold text-green-600">₹{totalPaid.toFixed(2)}</p>
             </div>
           </div>
         </div>
 
-        {/* Action Buttons — Owner only */}
+        {/* Action Buttons */}
         {isOwner && (
           <div className="grid grid-cols-2 gap-3 mb-3">
             <button
@@ -531,18 +554,12 @@ const Ledger = () => {
         {/* Transaction List */}
         <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b flex justify-between items-center">
-            <h2 className="font-semibold text-gray-700 text-sm">
-              History / इतिहास
-            </h2>
-            <span className="text-xs text-gray-400">
-              {filteredTransactions.length} entries
-            </span>
+            <h2 className="font-semibold text-gray-700 text-sm">History / इतिहास</h2>
+            <span className="text-xs text-gray-400">{filteredTransactions.length} entries</span>
           </div>
 
           {loading ? (
-            <div className="text-center py-10 text-gray-400 text-sm">
-              Loading...
-            </div>
+            <div className="text-center py-10 text-gray-400 text-sm">Loading...</div>
           ) : filteredTransactions.length === 0 ? (
             <div className="text-center py-10 text-gray-400 text-sm">
               <p>No transactions yet</p>
@@ -554,27 +571,20 @@ const Ledger = () => {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      tx.type === 'due'
-                        ? 'bg-red-100 text-red-600'
-                        : 'bg-green-100 text-green-700'
+                      tx.type === 'due' ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'
                     }`}>
                       {tx.type === 'due' ? 'उधार / Due' : 'भरले / Paid'}
                     </span>
                     {tx.note && (
-                      <p className="text-xs text-gray-400 mt-0.5 truncate">
-                        {tx.note}
-                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5 truncate">{tx.note}</p>
                     )}
                   </div>
-                  <p className="text-xs text-gray-400 shrink-0">
-                    {formatDate(tx)}
-                  </p>
+                  <p className="text-xs text-gray-400 shrink-0">{formatDate(tx)}</p>
                   <div className="flex items-center gap-2 shrink-0">
                     <p className={`font-bold text-sm ${
                       tx.type === 'due' ? 'text-red-500' : 'text-green-600'
                     }`}>
-                      {tx.type === 'due' ? '- ' : '+ '}
-                      ₹{Number(tx.amount).toFixed(2)}
+                      {tx.type === 'due' ? '- ' : '+ '}₹{Number(tx.amount).toFixed(2)}
                     </p>
                     {isOwner && (
                       <button
@@ -589,8 +599,8 @@ const Ledger = () => {
                 </div>
                 {tx.image_id && (
                   <button
-                    onClick={() => setViewImage(getBillImageUrl(tx.image_id))}
-                    className="mt-2 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-100 transition-colors"
+                    onClick={() => openBillImage(tx.image_id)}
+                    className="mt-2 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-100 active:bg-green-200 transition-colors"
                   >
                     🧾 View Bill / बिल पहा
                   </button>
@@ -607,49 +617,25 @@ const Ledger = () => {
         )}
       </div>
 
-      {/* ── Share Modal ─────────────────────────────────────── */}
+      {/* Share Modal */}
       {shareModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
           <div className="w-full sm:max-w-sm bg-white rounded-t-2xl sm:rounded-2xl shadow-xl p-5">
-
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-base font-bold text-gray-800">
-                📤 Share Ledger
-              </h3>
-              <button
-                onClick={() => setShareModalOpen(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl font-bold w-8 h-8 flex items-center justify-center"
-              >
-                ✕
-              </button>
+              <h3 className="text-base font-bold text-gray-800">📤 Share Ledger</h3>
+              <button onClick={() => setShareModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-xl font-bold w-8 h-8 flex items-center justify-center">✕</button>
             </div>
-
-            {/* Customer info preview */}
             <div className="bg-gray-50 rounded-xl p-3 mb-4">
-              <p className="text-sm font-semibold text-gray-700">
-                {customer?.full_name}
-              </p>
+              <p className="text-sm font-semibold text-gray-700">{customer?.full_name}</p>
               <p className="text-xs text-gray-400">
-                {balance > 0
-                  ? `₹${balance.toFixed(2)} Due`
-                  : balance === 0
-                  ? 'Clear / साफ'
-                  : `₹${Math.abs(balance).toFixed(2)} Advance`}
+                {balance > 0 ? `₹${balance.toFixed(2)} Due` : balance === 0 ? 'Clear / साफ' : `₹${Math.abs(balance).toFixed(2)} Advance`}
               </p>
-              <p className="text-xs text-gray-400 mt-1">
-                {transactions.length} transactions total
-              </p>
+              <p className="text-xs text-gray-400 mt-1">{transactions.length} transactions total</p>
             </div>
-
-            {/* Phone number field */}
             <div className="mb-4">
-              <label className="block text-sm text-gray-600 mb-1">
-                WhatsApp Number / व्हाट्सएप नंबर
-              </label>
+              <label className="block text-sm text-gray-600 mb-1">WhatsApp Number / व्हाट्सएप नंबर</label>
               <div className="flex items-center border rounded-xl overflow-hidden focus-within:ring-2 focus-within:ring-green-500">
-                <span className="px-3 py-2.5 bg-gray-50 text-gray-500 text-sm border-r">
-                  +91
-                </span>
+                <span className="px-3 py-2.5 bg-gray-50 text-gray-500 text-sm border-r">+91</span>
                 <input
                   type="tel"
                   value={customerPhone}
@@ -659,122 +645,94 @@ const Ledger = () => {
                   maxLength={10}
                 />
               </div>
-              <p className="text-xs text-gray-400 mt-1">
-                PDF will download + WhatsApp will open with summary
-              </p>
             </div>
-
-            {/* What will be sent info */}
             <div className="bg-green-50 border border-green-200 rounded-xl p-3 mb-4">
-              <p className="text-xs font-semibold text-green-700 mb-1">
-                What will happen:
-              </p>
-              <p className="text-xs text-green-600">
-                📥 PDF downloads to your device
-              </p>
-              <p className="text-xs text-green-600">
-                💬 WhatsApp opens with transaction summary
-              </p>
-              <p className="text-xs text-green-600">
-                📎 You can attach the PDF in WhatsApp manually
-              </p>
+              <p className="text-xs font-semibold text-green-700 mb-1">What will happen:</p>
+              <p className="text-xs text-green-600">📥 PDF downloads to your device</p>
+              <p className="text-xs text-green-600">💬 WhatsApp opens with transaction summary</p>
+              <p className="text-xs text-green-600">📎 Attach the PDF in WhatsApp manually</p>
             </div>
-
-            {/* Buttons */}
             <div className="flex gap-3">
-              <button
-                onClick={() => setShareModalOpen(false)}
-                className="flex-1 border border-gray-300 rounded-xl py-3 text-gray-600 text-sm hover:bg-gray-50"
-              >
-                Cancel
-              </button>
+              <button onClick={() => setShareModalOpen(false)} className="flex-1 border border-gray-300 rounded-xl py-3 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
               <button
                 onClick={handleSendWhatsApp}
                 disabled={!customerPhone || customerPhone.length < 10}
-                className="flex-1 bg-green-500 hover:bg-green-600 active:bg-green-700 text-white rounded-xl py-3 text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2 transition-colors"
+                className="flex-1 bg-green-500 hover:bg-green-600 text-white rounded-xl py-3 text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2 transition-colors"
               >
-                <span>📲</span>
-                Send on WhatsApp
+                <span>📲</span> Send on WhatsApp
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Add Transaction Modal ───────────────────────────── */}
+      {/* Add Transaction Modal */}
       {formOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center">
           <div className="w-full sm:max-w-sm bg-white rounded-t-2xl sm:rounded-2xl shadow-xl p-5 max-h-[92vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
-              <h3 className={`text-base font-bold ${
-                formType === 'due' ? 'text-red-500' : 'text-green-700'
-              }`}>
-                {formType === 'due'
-                  ? '+ Add Due / उधार जोडा'
-                  : '+ Payment / पैसे मिळाले'}
+              <h3 className={`text-base font-bold ${formType === 'due' ? 'text-red-500' : 'text-green-700'}`}>
+                {formType === 'due' ? '+ Add Due / उधार जोडा' : '+ Payment / पैसे मिळाले'}
               </h3>
-              <button
-                onClick={() => setFormOpen(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl font-bold w-8 h-8 flex items-center justify-center"
-              >
-                ✕
-              </button>
+              <button onClick={() => setFormOpen(false)} className="text-gray-400 hover:text-gray-600 text-xl font-bold w-8 h-8 flex items-center justify-center">✕</button>
             </div>
 
             {error && (
-              <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                {error}
-              </div>
+              <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
             )}
 
             <form onSubmit={handleAddEntry} className="space-y-4">
               <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  Amount (₹) / रक्कम
-                </label>
+                <label className="block text-sm text-gray-600 mb-1">Amount (₹) / रक्कम</label>
                 <input
-                  type="number"
-                  min="1"
-                  step="0.01"
-                  value={amount}
-                  onChange={e => setAmount(e.target.value)}
-                  required
-                  placeholder="0.00"
+                  type="number" min="1" step="0.01"
+                  value={amount} onChange={e => setAmount(e.target.value)}
+                  required placeholder="0.00"
                   className="w-full border rounded-xl px-3 py-3 focus:ring-2 focus:ring-green-500 focus:outline-none text-xl font-bold"
                 />
               </div>
 
               <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  Note / टीप (optional)
-                </label>
+                <label className="block text-sm text-gray-600 mb-1">Note / टीप (optional)</label>
                 <input
-                  type="text"
-                  value={note}
-                  onChange={e => setNote(e.target.value)}
+                  type="text" value={note} onChange={e => setNote(e.target.value)}
                   placeholder="e.g. Fertilizer / खत"
                   className="w-full border rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-green-500 focus:outline-none text-sm"
                 />
               </div>
 
               <div>
-                <label className="block text-sm text-gray-600 mb-1">
-                  Date / तारीख
-                </label>
+                <label className="block text-sm text-gray-600 mb-1">Date / तारीख</label>
                 <input
-                  type="date"
-                  value={date}
-                  onChange={e => setDate(e.target.value)}
+                  type="date" value={date} onChange={e => setDate(e.target.value)}
                   className="w-full border rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-green-500 focus:outline-none text-sm"
                 />
               </div>
 
+              {/* Bill Image — only for due */}
               {formType === 'due' && (
                 <div>
                   <label className="block text-sm text-gray-600 mb-2">
                     Bill Image / बिल फोटो (optional)
                   </label>
-                  {billPreview && (
+
+                  {/* Compression info */}
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 mb-2">
+                    <p className="text-xs text-blue-600">
+                      📦 Images are auto-compressed to save space. iPhone photos supported ✅
+                    </p>
+                  </div>
+
+                  {/* Compressing indicator */}
+                  {compressing && (
+                    <div className="flex items-center gap-2 text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded-lg px-3 py-2 mb-2">
+                      <div className="animate-spin w-3 h-3 border-2 border-orange-500 border-t-transparent rounded-full" />
+                      Compressing image... / इमेज संकुचित करत आहे...
+                    </div>
+                  )}
+
+                  {/* Preview */}
+                  {billPreview && !compressing && (
                     <div className="relative mb-2">
                       <img
                         src={billPreview}
@@ -788,27 +746,30 @@ const Ledger = () => {
                       >
                         ✕
                       </button>
+                      <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded-lg">
+                        {billImage && `${(billImage.size / 1024).toFixed(0)} KB`}
+                      </div>
                     </div>
                   )}
-                  {!billPreview && (
+
+                  {/* Camera + Gallery */}
+                  {!billPreview && !compressing && (
                     <div className="grid grid-cols-2 gap-2">
-                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors">
+                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors active:bg-green-100">
                         <span className="text-2xl">📷</span>
                         <span className="text-xs text-gray-500 font-medium">Camera / कॅमेरा</span>
                         <input
-                          type="file"
-                          accept="image/*"
+                          type="file" accept="image/*"
                           capture="environment"
                           onChange={handleImageChange}
                           className="hidden"
                         />
                       </label>
-                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors">
+                      <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-300 rounded-xl py-4 cursor-pointer hover:border-green-400 hover:bg-green-50 transition-colors active:bg-green-100">
                         <span className="text-2xl">🖼️</span>
                         <span className="text-xs text-gray-500 font-medium">Gallery / गॅलरी</span>
                         <input
-                          type="file"
-                          accept="image/*"
+                          type="file" accept="image/*"
                           onChange={handleImageChange}
                           className="hidden"
                         />
@@ -820,22 +781,21 @@ const Ledger = () => {
 
               <div className="flex gap-3 pt-1">
                 <button
-                  type="button"
-                  onClick={() => setFormOpen(false)}
+                  type="button" onClick={() => setFormOpen(false)}
                   className="flex-1 border border-gray-300 rounded-xl py-3 text-gray-600 hover:bg-gray-50 text-sm font-medium"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || compressing}
                   className={`flex-1 text-white rounded-xl py-3 font-semibold text-sm disabled:opacity-60 transition-colors ${
-                    formType === 'due'
-                      ? 'bg-red-500 hover:bg-red-600'
-                      : 'bg-green-600 hover:bg-green-700'
+                    formType === 'due' ? 'bg-red-500 hover:bg-red-600' : 'bg-green-600 hover:bg-green-700'
                   }`}
                 >
-                  {saving
+                  {compressing
+                    ? 'Compressing...'
+                    : saving
                     ? uploadProgress ? 'Uploading...' : 'Saving...'
                     : formType === 'due' ? 'Add Due' : 'Add Payment'}
                 </button>
@@ -845,7 +805,7 @@ const Ledger = () => {
         </div>
       )}
 
-      {/* ── Bill Image Viewer ───────────────────────────────── */}
+      {/* Full screen bill image viewer */}
       {viewImage && (
         <div
           className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4"
@@ -863,6 +823,11 @@ const Ledger = () => {
               alt="Bill"
               className="w-full rounded-xl shadow-2xl object-contain max-h-[80vh]"
               onClick={e => e.stopPropagation()}
+              onError={(e) => {
+                // Fallback if image fails to load
+                e.target.style.display = 'none'
+                setError('Could not load image.')
+              }}
             />
           </div>
         </div>
