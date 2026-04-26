@@ -57,10 +57,24 @@ const CustomerDashboard = () => {
     })
   }
 
-  const getBillImageUrl = (imageId) => {
-    return storage.getFileView(BILL_BUCKET_ID, imageId)
+ const getBillImageUrl = (imageId) => {
+  try {
+    const urlObj = storage.getFileView(BILL_BUCKET_ID, imageId)
+    if (urlObj && typeof urlObj === 'object' && urlObj.href) {
+      return urlObj.href
+    }
+    if (urlObj && typeof urlObj === 'string') {
+      return urlObj
+    }
+    const endpoint = import.meta.env.VITE_APPWRITE_ENDPOINT
+    const projectId = import.meta.env.VITE_APPWRITE_PROJECT_ID
+    return `${endpoint}/storage/buckets/${BILL_BUCKET_ID}/files/${imageId}/view?project=${projectId}`
+  } catch {
+    const endpoint = import.meta.env.VITE_APPWRITE_ENDPOINT
+    const projectId = import.meta.env.VITE_APPWRITE_PROJECT_ID
+    return `${endpoint}/storage/buckets/${BILL_BUCKET_ID}/files/${imageId}/view?project=${projectId}`
   }
-
+}
   return (
     <div className="min-h-screen bg-gray-50 pb-6">
       <Navbar />

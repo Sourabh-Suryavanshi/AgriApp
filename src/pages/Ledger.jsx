@@ -33,11 +33,12 @@ const Ledger = () => {
   const [billPreview, setBillPreview] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(false)
   const [compressing, setCompressing] = useState(false)
-  const [viewImage, setViewImage] = useState(null)
   const [generatingPdf, setGeneratingPdf] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [customerPhone, setCustomerPhone] = useState('')
-  const [imageUrls, setImageUrls] = useState({})
+  const [expandedImage, setExpandedImage] = useState(null)
+  const [zoomedImage, setZoomedImage] = useState(null)
+
 
   const canAccess = isOwner || customerId === userProfile?.$id
 
@@ -213,43 +214,24 @@ const Ledger = () => {
     }
   }
 
-  // ── Fix iPhone image display ───────────────────────────────────
-  const getBillImageUrl = (imageId) => {
-    try {
-      // getFilePreview converts any format to JPEG/PNG
-      // This fixes HEIC display on iPhone browsers
-      const url = storage.getFilePreview(
-        BILL_BUCKET_ID,
-        imageId,
-        1280,   // width
-        0,      // height (0 = auto)
-        'center', // gravity
-        80,     // quality
-        0,      // border width
-        '',     // border color
-        0,      // border radius
-        1,      // opacity
-        0,      // rotation
-        '',     // background
-        'jpg'   // output format — always JPEG, fixes iPhone HEIC
-      )
-      return url.href || url
-    } catch {
-      // Fallback to getFileView
-      return storage.getFileView(BILL_BUCKET_ID, imageId)
+const getBillImageUrl = (imageId) => {
+  try {
+    const urlObj = storage.getFileView(BILL_BUCKET_ID, imageId)
+    if (urlObj && typeof urlObj === 'object' && urlObj.href) {
+      return urlObj.href
     }
-  }
-
-  const openBillImage = async (imageId) => {
-    // Check if URL already cached
-    if (imageUrls[imageId]) {
-      setViewImage(imageUrls[imageId])
-      return
+    if (urlObj && typeof urlObj === 'string') {
+      return urlObj
     }
-    const url = getBillImageUrl(imageId)
-    setImageUrls(prev => ({ ...prev, [imageId]: url }))
-    setViewImage(url)
+    const endpoint = import.meta.env.VITE_APPWRITE_ENDPOINT
+    const projectId = import.meta.env.VITE_APPWRITE_PROJECT_ID
+    return `${endpoint}/storage/buckets/${BILL_BUCKET_ID}/files/${imageId}/view?project=${projectId}`
+  } catch {
+    const endpoint = import.meta.env.VITE_APPWRITE_ENDPOINT
+    const projectId = import.meta.env.VITE_APPWRITE_PROJECT_ID
+    return `${endpoint}/storage/buckets/${BILL_BUCKET_ID}/files/${imageId}/view?project=${projectId}`
   }
+}
 
   const formatDate = (tx) => {
     const dateStr = tx.date || tx.$createdAt
@@ -551,64 +533,162 @@ const Ledger = () => {
           ))}
         </div>
 
-        {/* Transaction List */}
-        <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b flex justify-between items-center">
-            <h2 className="font-semibold text-gray-700 text-sm">History / इतिहास</h2>
-            <span className="text-xs text-gray-400">{filteredTransactions.length} entries</span>
+       {/* Transaction List */}
+<div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+  <div className="px-4 py-3 border-b flex justify-between items-center">
+    <h2 className="font-semibold text-gray-700 text-sm">History / इतिहास</h2>
+    <span className="text-xs text-gray-400">{filteredTransactions.length} entries</span>
+  </div>
+
+  {loading ? (
+    <div className="text-center py-10 text-gray-400 text-sm">Loading...</div>
+  ) : filteredTransactions.length === 0 ? (
+    <div className="text-center py-10 text-gray-400 text-sm">
+      <p>No transactions yet</p>
+      <p className="text-xs mt-1">अजून कोणतेही व्यवहार नाही</p>
+    </div>
+  ) : (
+    filteredTransactions.map(tx => (
+      <div key={tx.$id} className="border-b last:border-b-0">
+
+        {/* Transaction Row */}
+        <div className="px-4 py-3 flex items-center justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+              tx.type === 'due' ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'
+            }`}>
+              {tx.type === 'due' ? 'उधार / Due' : 'भरले / Paid'}
+            </span>
+            {tx.note && (
+              <p className="text-xs text-gray-400 mt-0.5 truncate">{tx.note}</p>
+            )}
           </div>
 
-          {loading ? (
-            <div className="text-center py-10 text-gray-400 text-sm">Loading...</div>
-          ) : filteredTransactions.length === 0 ? (
-            <div className="text-center py-10 text-gray-400 text-sm">
-              <p>No transactions yet</p>
-              <p className="text-xs mt-1">अजून कोणतेही व्यवहार नाही</p>
-            </div>
-          ) : (
-            filteredTransactions.map(tx => (
-              <div key={tx.$id} className="px-4 py-3 border-b last:border-b-0">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      tx.type === 'due' ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'
-                    }`}>
-                      {tx.type === 'due' ? 'उधार / Due' : 'भरले / Paid'}
-                    </span>
-                    {tx.note && (
-                      <p className="text-xs text-gray-400 mt-0.5 truncate">{tx.note}</p>
-                    )}
-                  </div>
-                  <p className="text-xs text-gray-400 shrink-0">{formatDate(tx)}</p>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <p className={`font-bold text-sm ${
-                      tx.type === 'due' ? 'text-red-500' : 'text-green-600'
-                    }`}>
-                      {tx.type === 'due' ? '- ' : '+ '}₹{Number(tx.amount).toFixed(2)}
-                    </p>
-                    {isOwner && (
-                      <button
-                        onClick={() => handleDelete(tx)}
-                        disabled={deletingId === tx.$id}
-                        className="text-gray-300 hover:text-red-500 transition-colors text-base disabled:opacity-40"
-                      >
-                        {deletingId === tx.$id ? '...' : '✕'}
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {tx.image_id && (
-                  <button
-                    onClick={() => openBillImage(tx.image_id)}
-                    className="mt-2 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-100 active:bg-green-200 transition-colors"
-                  >
-                    🧾 View Bill / बिल पहा
-                  </button>
-                )}
-              </div>
-            ))
-          )}
+          <p className="text-xs text-gray-400 shrink-0">{formatDate(tx)}</p>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <p className={`font-bold text-sm ${
+              tx.type === 'due' ? 'text-red-500' : 'text-green-600'
+            }`}>
+              {tx.type === 'due' ? '- ' : '+ '}₹{Number(tx.amount).toFixed(2)}
+            </p>
+
+            {/* View Bill toggle button */}
+            {tx.image_id && (
+              <button
+                onClick={() =>
+                  setExpandedImage(
+                    expandedImage === tx.$id ? null : tx.$id
+                  )
+                }
+                className={`text-xs px-2 py-1 rounded-lg border transition-colors shrink-0 ${
+                  expandedImage === tx.$id
+                    ? 'bg-green-700 text-white border-green-700'
+                    : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
+                }`}
+              >
+                {expandedImage === tx.$id ? '🔼 Hide' : '🧾 Bill'}
+              </button>
+            )}
+
+            {/* Delete button */}
+            {isOwner && (
+              <button
+                onClick={() => handleDelete(tx)}
+                disabled={deletingId === tx.$id}
+                className="text-gray-300 hover:text-red-500 transition-colors text-base disabled:opacity-40"
+              >
+                {deletingId === tx.$id ? '...' : '✕'}
+              </button>
+            )}
+          </div>
         </div>
+
+       {/* Inline Bill Image — expands below the row */}
+{tx.image_id && expandedImage === tx.$id && (
+  <div className="px-4 pb-4 bg-gray-50 border-t border-gray-100">
+
+    {/* Image header */}
+    <div className="flex justify-between items-center py-2 mb-2">
+      <p className="text-xs font-semibold text-gray-600">
+        🧾 Bill Image / बिल फोटो
+      </p>
+      <button
+        onClick={() => {
+          setExpandedImage(null)
+          setZoomedImage(null)
+        }}
+        className="text-xs text-gray-400 hover:text-red-500 flex items-center gap-1"
+      >
+        ✕ Close
+      </button>
+    </div>
+
+    {/* Image */}
+    <div className="relative">
+      <img
+        src={getBillImageUrl(tx.image_id)}
+        alt="Bill"
+        className="w-full rounded-xl border border-gray-200 object-contain max-h-72 bg-white cursor-zoom-in"
+        onClick={() => setZoomedImage(getBillImageUrl(tx.image_id))}
+        onError={(e) => {
+          e.target.style.display = 'none'
+          e.target.nextSibling.style.display = 'flex'
+        }}
+      />
+
+      {/* Error fallback */}
+      <div className="hidden flex-col items-center justify-center gap-2 py-8 bg-white rounded-xl border border-gray-200">
+        <span className="text-3xl">🖼️</span>
+        <p className="text-xs text-gray-400">Could not load image</p>
+        
+          href={getBillImageUrl(tx.image_id)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-green-700 underline"
+        <a>
+          Open in new tab →
+        </a>
+      </div>
+
+      {/* Amount overlay */}
+      <div className="absolute top-2 right-2 bg-black/60 text-white text-xs font-bold px-2 py-1 rounded-lg">
+        {tx.type === 'due' ? '- ' : '+ '}₹{Number(tx.amount).toFixed(2)}
+      </div>
+
+      {/* Zoom hint */}
+      <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded-lg flex items-center gap-1">
+        🔍 Tap to zoom / झूम करा
+      </div>
+    </div>
+
+    {/* Verify row */}
+    <div className="mt-2 flex items-center justify-between bg-white rounded-lg border border-gray-200 px-3 py-2">
+      <div>
+        <p className="text-xs text-gray-400">Entered Amount / रक्कम</p>
+        <p className={`text-sm font-bold ${
+          tx.type === 'due' ? 'text-red-500' : 'text-green-600'
+        }`}>
+          {tx.type === 'due' ? '- ' : '+ '}₹{Number(tx.amount).toFixed(2)}
+        </p>
+      </div>
+      <div className="text-right">
+        <p className="text-xs text-gray-400">Date / तारीख</p>
+        <p className="text-xs font-semibold text-gray-700">{formatDate(tx)}</p>
+      </div>
+      {tx.note && (
+        <div className="text-right">
+          <p className="text-xs text-gray-400">Note / टीप</p>
+          <p className="text-xs font-semibold text-gray-700">{tx.note}</p>
+        </div>
+      )}
+    </div>
+  </div>
+)}
+      </div>
+    ))
+  )}
+</div>
 
         {error && (
           <div className="mt-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
@@ -804,35 +884,45 @@ const Ledger = () => {
           </div>
         </div>
       )}
+      {/* Zoom Modal */}
+{zoomedImage && (
+  <div
+    className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center"
+    onClick={() => setZoomedImage(null)}
+  >
+    {/* Close button */}
+    <button
+      onClick={() => setZoomedImage(null)}
+      className="absolute top-4 right-4 text-white bg-white/20 hover:bg-white/30 rounded-full w-9 h-9 flex items-center justify-center text-lg transition-colors z-10"
+    >
+      ✕
+    </button>
 
-      {/* Full screen bill image viewer */}
-      {viewImage && (
-        <div
-          className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4"
-          onClick={() => setViewImage(null)}
-        >
-          <div className="relative w-full max-w-lg">
-            <button
-              onClick={() => setViewImage(null)}
-              className="absolute -top-10 right-0 text-white text-sm bg-white/20 rounded-full px-3 py-1"
-            >
-              Close ✕
-            </button>
-            <img
-              src={viewImage}
-              alt="Bill"
-              className="w-full rounded-xl shadow-2xl object-contain max-h-[80vh]"
-              onClick={e => e.stopPropagation()}
-              onError={(e) => {
-                // Fallback if image fails to load
-                e.target.style.display = 'none'
-                setError('Could not load image.')
-              }}
-            />
-          </div>
-        </div>
-      )}
+    {/* Hint text */}
+    <p className="absolute top-4 left-4 text-white/50 text-xs">
+      Pinch to zoom • Tap outside to close
+    </p>
+
+    {/* Zoomable image */}
+    <div
+      className="w-full h-full flex items-center justify-center p-4"
+      onClick={e => e.stopPropagation()}
+    >
+      <img
+        src={zoomedImage}
+        alt="Bill zoomed"
+        className="max-w-full max-h-full object-contain rounded-lg"
+        style={{
+          touchAction: 'pinch-zoom',
+          cursor: 'zoom-out'
+        }}
+        onClick={() => setZoomedImage(null)}
+      />
     </div>
+  </div>
+)}
+    </div>
+    
   )
 }
 
