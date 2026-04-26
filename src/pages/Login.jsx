@@ -13,12 +13,21 @@ const Login = () => {
     setError('')
 
     try {
-      const fakeEmail = `${username.trim().toLowerCase()}@gomteshagro.app`
+      // Step 1 — Clear any old session first
+      try {
+        await account.deleteSession('current')
+      } catch {
+        // No existing session — that's fine, continue
+      }
 
+      // Step 2 — Create new session
+      const fakeEmail = `${username.trim().toLowerCase()}@gomteshagro.app`
       await account.createEmailPasswordSession(fakeEmail, password.trim())
 
+      // Step 3 — Get logged in user
       const user = await account.get()
 
+      // Step 4 — Fetch profile
       const profileRes = await databases.listDocuments(
         DB_ID,
         PROFILES_ID,
@@ -32,6 +41,8 @@ const Login = () => {
         await account.deleteSession('current')
         return
       }
+
+      // Step 5 — Navigate based on role
       if (profile.role === 'owner') {
         window.location.href = '/dashboard'
       } else if (profile.role === 'customer') {
