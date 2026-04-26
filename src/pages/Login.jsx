@@ -69,7 +69,7 @@ const Login = () => {
             🚜
           </div>
           <h1 className="text-xl font-bold text-green-700">Gomtesh Agro Agency</h1>
-          <p className="text-sm text-gray-400">गोमतेश अॅग्रो एजन्सी</p>
+          <p className="text-sm text-gray-400">गोमटेश अॅग्रो एजन्सी</p>
         </div>
 
         {error && (
